@@ -21,6 +21,15 @@ class Firefly(object):
     def get_accounts(self, account_type="asset"):
         return self._get("accounts", params={"type": account_type})
 
+    def get_rules(self):
+        return self._get("rules")
+
+    def get_account(self, id):
+        return self._get(f"accounts/{id}")
+
+    def get_bills(self):
+        return self._get("bills")
+
     def get_about_user(self):
         return self._get("about/user")
 
