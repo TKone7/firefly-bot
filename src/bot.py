@@ -25,6 +25,7 @@ FIREFLY_URL, FIREFLY_TOKEN, DEFAULT_WITHDRAW_ACCOUNT = range(3)
 DESCRIPTION, SOURCE, DEST, AMOUNT = range(4)
 SELECT, SPLIT, SET_SPLIT_ACCOUNT = range(3)
 
+
 def start(update, context):
     update.message.reply_text("Please enter your Firefly III URL")
     return FIREFLY_URL
@@ -37,6 +38,7 @@ def get_firefly_token(update, context):
     Please enter your Firefly III User Token
     \nYou can generate it from the OAuth section here - {}/profile""".format(firefly_url))
     return DEFAULT_WITHDRAW_ACCOUNT
+
 
 def get_default_account(update, context):
     token = update.message.text
@@ -66,54 +68,13 @@ def store_default_account(update, context):
     return ConversationHandler.END
 
 
-def spend(update, context):
-
-    def safe_list_get(l, idx):
-        try:
-            return l[idx]
-        except IndexError:
-            return None
-
-    message = update.message.text
-    if "," not in message:
-        message_data = message.split(" ")
-    else:
-        message_data = message.split(",")
-
-    message_data = [value.strip() for value in message_data]
-
-    if len(message_data) < 2:
-        update.message.reply_text(
-            "Just type in an expense with a description. Like this - '5 Starbucks`")
-        return
-
-    amount = safe_list_get(message_data, 0)
-    description = safe_list_get(message_data, 1)
-    category = safe_list_get(message_data, 2)
-    budget = safe_list_get(message_data, 3)
-    source_account = safe_list_get(message_data, 4)
-    destination_account = safe_list_get(message_data, 5)
-
-    firefly = get_firefly(context)
-    if not source_account:
-        source_account = context.user_data["firefly_default_account"]
-
-    response = firefly.create_withdrawal(amount, description,
-                                          source_account, destination_account, category, budget)
-    if response.status_code == 422:
-        update.message.reply_text(response.get("message"))
-    elif response.status_code == 200:
-        try:
-            id = response.json().get("data").get("id")
-            firefly_url = context.user_data.get("firefly_url")
-            update.message.reply_markdown(
-                "[Expense logged successfully]({0}/transactions/show/{1})".format(
-                    firefly_url, id
-                ))
-        except:
-            update.message.reply_text("Please check input values")
-    else:
-        update.message.reply_text("Something went wrong, check logs")
+def store_split_account(update: Update, context: CallbackContext) -> None:
+    query = update.callback_query
+    query.answer()
+    asset_account = json.loads(query.data)
+    context.user_data["firefly_split"] = asset_account
+    query.edit_message_text("Account stored. You can now start over again by typing /split")
+    return ConversationHandler.END
 
 
 def about(update, context):
@@ -126,7 +87,7 @@ def get_firefly(context):
     return Firefly(hostname=context.user_data.get("firefly_url"), auth_token=context.user_data.get("firefly_token"))
 
 
-def help(update, context):
+def show_help(update, context):
     if not context.user_data.get("firefly_default_account"):
         update.message.reply_text("Type /start to initiate the setup process.")
     else:
@@ -146,7 +107,8 @@ You can skip specfic fields by leaving them empty (except the first two) -
         `5, Starbucks, , Food Budget, UCO Bank`
 """)
 
-def get_defaultAsset_keyboard(firefly):
+
+def get_default_asset_keyboard(firefly):
     accounts = firefly.get_accounts(account_type="asset").get("data")
     accounts_keyboard = []
     for i, account in enumerate(accounts):
@@ -162,28 +124,22 @@ def get_defaultAsset_keyboard(firefly):
 
     return InlineKeyboardMarkup(accounts_keyboard)
 
+
 def get_balance(update, context):
     firefly = get_firefly(context)
 
-    reply_markup = get_defaultAsset_keyboard(firefly)
+    reply_markup = get_default_asset_keyboard(firefly)
     update.message.reply_text(
         "What balance do you want to know?", reply_markup=reply_markup)
     return 0
 
-def process_split_account(update: Update, context: CallbackContext) -> None:
-    query = update.callback_query
-    query.answer()
-    asset_account = json.loads(query.data)
-    context.user_data["firefly_split"] = asset_account
-    query.edit_message_text("Account stored. You can now start over again by typing /split")
-    return ConversationHandler.END
 
 def select_tx(update, context):
     firefly = get_firefly(context)
     balance_account = context.user_data.get("firefly_split")
 
     if not balance_account:
-        reply_markup = get_defaultAsset_keyboard(firefly)
+        reply_markup = get_default_asset_keyboard(firefly)
         update.message.reply_text(
             "Please define the account that should be used for balancing split amounts?", reply_markup=reply_markup)
         return SET_SPLIT_ACCOUNT
@@ -196,14 +152,15 @@ def select_tx(update, context):
         tx_desc = sub_tx.get("description")
         tx_curry = sub_tx.get("currency_symbol")
         tx_amount = round(float(sub_tx.get("amount")), 2)
-        id = tx.get("id")
+        tx_id = tx.get("id")
         txs_keyboard.append([InlineKeyboardButton(
-            f"{tx_desc} ({tx_curry} {tx_amount})", callback_data=id)])
+            f"{tx_desc} ({tx_curry} {tx_amount})", callback_data=tx_id)])
 
     reply_markup = InlineKeyboardMarkup(txs_keyboard)
     update.message.reply_text(
         "chose from the tx you want to change", reply_markup=reply_markup)
     return SELECT
+
 
 def select_ratio(update: Update, context: CallbackContext) -> None:
     query = update.callback_query
@@ -211,12 +168,16 @@ def select_ratio(update: Update, context: CallbackContext) -> None:
     tx_id = query.data
     context.user_data["split_tx_id"] = tx_id
     ratio_keyboard = [[InlineKeyboardButton("specify amount", callback_data=0)],
-                      [InlineKeyboardButton("four", callback_data=(4)), InlineKeyboardButton("five", callback_data=(5))],
-                      [InlineKeyboardButton("two", callback_data=(2)), InlineKeyboardButton("three", callback_data=(3))]]
+                      [InlineKeyboardButton("four", callback_data=4),
+                       InlineKeyboardButton("five", callback_data=5)],
+                      [InlineKeyboardButton("two", callback_data=2),
+                       InlineKeyboardButton("three", callback_data=3)]]
     reply_markup = InlineKeyboardMarkup(ratio_keyboard)
     query.edit_message_text(f"selected {tx_id}")
     query.message.reply_text("Chose a ratio to split:", reply_markup=reply_markup)
     return SPLIT
+
+
 def split_transaction(update: Update, context: CallbackContext) -> None:
     firefly = get_firefly(context)
     query = update.callback_query
@@ -253,13 +214,18 @@ def split_transaction(update: Update, context: CallbackContext) -> None:
             budget_id=balance_tx_budget,
             date=balance_tx_date
         )
-        id = response.json().get("data").get("id")
+        tx_id = response.json().get("data").get("id")
         id_create = response_create.json().get("data").get("id")
-        query.message.reply_text(f"Update transaction {id}") if response.status_code == 200 else query.message.reply_text(f"Error in update {response.status_code}")
-        query.message.reply_text(f"Created transaction {id_create}") if response_create.status_code == 200 else query.message.reply_text(f"Error in creation {response_create.status_code}")
+        query.message.reply_text(
+            f"Update transaction {tx_id}") if response.status_code == 200 else query.message.reply_text(
+            f"Error in update {response.status_code}")
+        query.message.reply_text(
+            f"Created transaction {id_create}") if response_create.status_code == 200 else query.message.reply_text(
+            f"Error in creation {response_create.status_code}")
     except:
         query.message.reply_text("Something went wrong")
     return ConversationHandler.END
+
 
 def show_balance(update: Update, context: CallbackContext) -> None:
     query = update.callback_query
@@ -276,11 +242,10 @@ def show_balance(update: Update, context: CallbackContext) -> None:
 
 def start_expense(update, context):
     firefly = get_firefly(context)
-    reply_markup = get_defaultAsset_keyboard(firefly)
-
     update.message.reply_text(
         "Enter a description")
     return DESCRIPTION
+
 
 def get_expense_account(update, context):
     firefly = get_firefly(context)
@@ -298,9 +263,9 @@ def get_expense_account(update, context):
         rule_actions = [action.get("type") for action in rule.get("attributes").get("actions")]
         for trigger in rule_triggers:
             if (trigger.get("type") == "description_contains"
-                and  trigger.get("value").lower() in update.message.text.lower()
-                and 'set_source_account' in rule_actions
-                and 'set_destination_account' in rule_actions):
+                    and trigger.get("value").lower() in update.message.text.lower()
+                    and 'set_source_account' in rule_actions
+                    and 'set_destination_account' in rule_actions):
                 matched_rules.append(rule)
 
     if len(matched_rules) == 1:
@@ -312,15 +277,13 @@ def get_expense_account(update, context):
             if trigger.get("type") != "description_contains":
                 further_cond.append(f"{trigger.get('type')}: {trigger.get('value')}")
 
-        list = "\n".join(further_cond)
-
         context.user_data["asset_account"] = dict(id="1", name="Credit Suisse")
         context.user_data["expense_account"] = "dummy"
 
         update.message.reply_markdown(f"*{title}*\nPlease enter amount:")
         return AMOUNT
     else:
-        reply_markup = get_defaultAsset_keyboard(firefly)
+        reply_markup = get_default_asset_keyboard(firefly)
         update.message.reply_text(
             "Chose from which account to spend", reply_markup=reply_markup)
         return SOURCE
@@ -348,31 +311,34 @@ def get_withdraw_account(update: Update, context: CallbackContext) -> None:
     query.message.reply_text("Chose an expense account", reply_markup=markup)
     return DEST
 
+
 def get_amount(update, context):
     context.user_data["expense_account"] = update.message.text
 
     update.message.reply_text("Now, please, enter an amount:")
-    #return ConversationHandler.END
+    # return ConversationHandler.END
     return AMOUNT
+
 
 def summarize(update, context):
     asset_account = context.user_data.get("asset_account")
     expense_account = context.user_data.get("expense_account")
     description = context.user_data.get("description")
-    update.message.reply_text(f"Withdraw from {asset_account['name']} to {expense_account}, amount {update.message.text}, description: {description}")
+    update.message.reply_text(
+        f"Withdraw from {asset_account['name']} to {expense_account}, amount {update.message.text}, description: {description}")
 
     firefly = get_firefly(context)
     response = firefly.create_withdrawal(update.message.text, description,
-                                          asset_account['id'], expense_account)
+                                         asset_account['id'], expense_account)
     if response.status_code == 422:
         update.message.reply_text(response.get("message"))
     elif response.status_code == 200:
         try:
-            id = response.json().get("data").get("id")
+            tx_id = response.json().get("data").get("id")
             firefly_url = context.user_data.get("firefly_url")
             update.message.reply_markdown(
                 "[Expense logged successfully]({0}/transactions/show/{1})".format(
-                    firefly_url, id
+                    firefly_url, tx_id
                 ))
         except:
             update.message.reply_text("Please check input values")
@@ -380,6 +346,7 @@ def summarize(update, context):
         update.message.reply_text("Something went wrong, check logs")
 
     return ConversationHandler.END
+
 
 def cancel(update, context):
     update.message.reply_text("Cancelled")
@@ -398,7 +365,7 @@ def main():
         data_dir.mkdir(parents=True, exist_ok=True)
     else:
         data_dir = Path(data_dir)
-    bot_persistence = PicklePersistence(filename=str(data_dir/"bot-data"))
+    bot_persistence = PicklePersistence(filename=str(data_dir / "bot-data"))
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
     updater = Updater(bot_token,
                       persistence=bot_persistence, use_context=True)
@@ -436,16 +403,16 @@ def main():
         states={
             SELECT: [CallbackQueryHandler(select_ratio)],
             SPLIT: [CallbackQueryHandler(split_transaction)],
-            SET_SPLIT_ACCOUNT: [CallbackQueryHandler(process_split_account)],
+            SET_SPLIT_ACCOUNT: [CallbackQueryHandler(store_split_account)],
         },
         fallbacks=[CommandHandler("cancel", cancel)]
     )
     updater.dispatcher.add_handler(expense)
     updater.dispatcher.add_handler(balance)
     updater.dispatcher.add_handler(split)
-    updater.dispatcher.add_handler(CommandHandler("help", help))
+    updater.dispatcher.add_handler(CommandHandler("help", show_help))
     updater.dispatcher.add_handler(CommandHandler("about", about))
-    #updater.dispatcher.add_handler(MessageHandler(
+    # updater.dispatcher.add_handler(MessageHandler(
     #    filters=Filters.regex("^[0-9]+"), callback=spend))
     updater.dispatcher.add_error_handler(error)
     updater.dispatcher.add_handler(conversation_handler)

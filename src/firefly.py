@@ -39,8 +39,8 @@ class Firefly(object):
     def get_rules(self):
         return self._get("rules")
 
-    def get_account(self, id):
-        return self._get(f"accounts/{id}")
+    def get_account(self, account_id):
+        return self._get(f"accounts/{account_id}")
 
     def get_bills(self):
         return self._get("bills")
@@ -48,7 +48,7 @@ class Firefly(object):
     def get_about_user(self):
         return self._get("about/user")
 
-    def update_transaction(self, id, **kwargs):
+    def update_transaction(self, transaction_id, **kwargs):
         payload = {
             "transactions": [{}]
         }
@@ -56,7 +56,7 @@ class Firefly(object):
             if key not in tx_attrs:
                 raise ValueError(f"Cannot set key {key} on a transaction")
             payload["transactions"][0][key] = value
-        return self._put(endpoint=f"transactions/{id}", payload=payload)
+        return self._put(endpoint=f"transactions/{transaction_id}", payload=payload)
 
     def create_transaction(self, **kwargs):
         if "type" not in kwargs.keys():
