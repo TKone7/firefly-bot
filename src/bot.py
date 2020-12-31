@@ -13,7 +13,7 @@ from pathlib import Path
 from firefly import Firefly
 from telegram import (InlineKeyboardButton, InlineKeyboardMarkup,
                       ReplyKeyboardRemove, Update, ReplyKeyboardMarkup)
-from telegram.ext import (CallbackQueryHandler, CommandHandler,
+from telegram.ext import (CallbackQueryHandler, CommandHandler, RegexHandler,
                           ConversationHandler, Filters, MessageHandler,
                           PicklePersistence, Updater, CallbackContext)
 
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 FIREFLY_URL, FIREFLY_TOKEN, DEFAULT_WITHDRAW_ACCOUNT = range(3)
 DESCRIPTION, SOURCE, DEST, AMOUNT = range(4)
 SELECT, SPLIT, SET_SPLIT_ACCOUNT = range(3)
-
+SHOW, DETAILS = range(2)
 
 def start(update, context):
     update.message.reply_text("Please enter your Firefly III URL")
@@ -124,6 +124,21 @@ def get_default_asset_keyboard(firefly):
 
     return InlineKeyboardMarkup(accounts_keyboard)
 
+def get_tx_list_keyboard(firefly):
+    txs_keyboard = []
+    response = firefly.get_transactions(tx_type="expense").get("data")
+    response.reverse()
+    for i, tx in enumerate(response):
+        sub_tx = tx.get("attributes").get("transactions")[0]
+        tx_desc = sub_tx.get("description")
+        tx_curry = sub_tx.get("currency_symbol")
+        tx_amount = round(float(sub_tx.get("amount")), 2)
+        tx_id = tx.get("id")
+        txs_keyboard.append([InlineKeyboardButton(
+            f"{tx_desc} ({tx_curry} {tx_amount})", callback_data=tx_id)])
+
+    return InlineKeyboardMarkup(txs_keyboard)
+
 
 def get_balance(update, context):
     firefly = get_firefly(context)
@@ -134,32 +149,92 @@ def get_balance(update, context):
     return 0
 
 
-def select_tx(update, context):
+def start_split(update, context):
     firefly = get_firefly(context)
     balance_account = context.user_data.get("firefly_split")
-
     if not balance_account:
         reply_markup = get_default_asset_keyboard(firefly)
         update.message.reply_text(
             "Please define the account that should be used for balancing split amounts?", reply_markup=reply_markup)
         return SET_SPLIT_ACCOUNT
 
-    response = firefly.get_transactions(tx_type="expense").get("data")
-    response.reverse()
-    txs_keyboard = []
-    for i, tx in enumerate(response):
-        sub_tx = tx.get("attributes").get("transactions")[0]
-        tx_desc = sub_tx.get("description")
-        tx_curry = sub_tx.get("currency_symbol")
-        tx_amount = round(float(sub_tx.get("amount")), 2)
-        tx_id = tx.get("id")
-        txs_keyboard.append([InlineKeyboardButton(
-            f"{tx_desc} ({tx_curry} {tx_amount})", callback_data=tx_id)])
-
-    reply_markup = InlineKeyboardMarkup(txs_keyboard)
-    update.message.reply_text(
-        "chose from the tx you want to change", reply_markup=reply_markup)
+    reply_markup = get_tx_list_keyboard(firefly)
+    update.message.reply_text("Please chose a transaction to split", reply_markup=reply_markup)
     return SELECT
+
+def show_tx(update, context):
+    if (len(context.args)>0):
+        tx_id = int(context.args[0])
+        firefly = get_firefly(context)
+        response = firefly.get_transaction(tx_id)
+        delete_button = [[
+            InlineKeyboardButton("Delete", callback_data=tx_id),
+            InlineKeyboardButton("Other", callback_data="other"),
+            InlineKeyboardButton("Cancel", callback_data="cancel")
+        ]]
+        reply_markup = InlineKeyboardMarkup(delete_button)
+        tx = response['data']['attributes']['transactions'][0]
+        update.message.reply_text(f"{tx['description']} {tx['currency_symbol']} {round(float(tx['amount']), 2)} "
+                                  f"\nSource: {tx['source_name']}"
+                                  f"\nDestination: {tx['destination_name']}"
+                                  f"\nCategory: {tx['category_name']}"
+                                  f"\nDate {tx['date']}", reply_markup=reply_markup)
+
+        return DETAILS
+
+    firefly = get_firefly(context)
+    reply_markup = get_tx_list_keyboard(firefly)
+    update.message.reply_text("Please chose a transaction to show", reply_markup=reply_markup)
+    return SHOW
+
+
+def delete_tx(update, context):
+    firefly = get_firefly(context)
+    query = update.callback_query
+    query.answer()
+    tx_id = int(query.data)
+    response = firefly.delete_transaction(tx_id)
+    if (response.status_code == 204):
+        query.message.reply_text("Transaction deleted")
+    else:
+        query.message.reply_text(f"Something went wrong ({response.status_code})")
+    return ConversationHandler.END
+
+
+def show_another_tx(update, context):
+    firefly = get_firefly(context)
+    query = update.callback_query
+    query.answer()
+    reply_markup = get_tx_list_keyboard(firefly)
+    query.edit_message_text("Please chose a transaction to show", reply_markup=reply_markup)
+    return SHOW
+
+def show_details(update, context):
+    firefly = get_firefly(context)
+    query = update.callback_query
+    query.answer()
+    tx_id = query.data
+    response = firefly.get_transaction(tx_id)
+    delete_button = [[
+        InlineKeyboardButton("Delete", callback_data=tx_id),
+        InlineKeyboardButton("Other", callback_data="other"),
+        InlineKeyboardButton("Cancel", callback_data="cancel")
+    ]]
+    reply_markup = InlineKeyboardMarkup(delete_button)
+    tx = response['data']['attributes']['transactions'][0]
+    query.edit_message_text(f"{tx['description']} {tx['currency_symbol']} {round(float(tx['amount']),2)} "
+                            f"\nSource: {tx['source_name']}"
+                            f"\nDestination: {tx['destination_name']}"
+                            f"\nCategory: {tx['category_name']}"
+                            f"\nDate {tx['date']}", reply_markup=reply_markup)
+
+    return DETAILS
+
+def cancel_details(update, context):
+    query = update.callback_query
+    query.answer()
+    query.edit_message_text("Bye")
+    return ConversationHandler.END
 
 
 def select_ratio(update: Update, context: CallbackContext) -> None:
@@ -168,10 +243,10 @@ def select_ratio(update: Update, context: CallbackContext) -> None:
     tx_id = query.data
     context.user_data["split_tx_id"] = tx_id
     ratio_keyboard = [[InlineKeyboardButton("specify amount", callback_data=0)],
-                      [InlineKeyboardButton("four", callback_data=4),
-                       InlineKeyboardButton("five", callback_data=5)],
-                      [InlineKeyboardButton("two", callback_data=2),
-                       InlineKeyboardButton("three", callback_data=3)]]
+                      [InlineKeyboardButton("4", callback_data=4),
+                       InlineKeyboardButton("5", callback_data=5)],
+                      [InlineKeyboardButton("2", callback_data=2),
+                       InlineKeyboardButton("3", callback_data=3)]]
     reply_markup = InlineKeyboardMarkup(ratio_keyboard)
     query.edit_message_text(f"selected {tx_id}")
     query.message.reply_text("Chose a ratio to split:", reply_markup=reply_markup)
@@ -336,10 +411,9 @@ def summarize(update, context):
         try:
             tx_id = response.json().get("data").get("id")
             firefly_url = context.user_data.get("firefly_url")
-            update.message.reply_markdown(
-                "[Expense logged successfully]({0}/transactions/show/{1})".format(
-                    firefly_url, tx_id
-                ))
+            update.message.reply_text(
+                f"Expense logged successfully. Use /list {tx_id} to see details."
+                )
         except:
             update.message.reply_text("Please check input values")
     else:
@@ -399,7 +473,7 @@ def main():
     )
 
     split = ConversationHandler(
-        entry_points=[CommandHandler("split", select_tx)],
+        entry_points=[CommandHandler("split", start_split)],
         states={
             SELECT: [CallbackQueryHandler(select_ratio)],
             SPLIT: [CallbackQueryHandler(split_transaction)],
@@ -407,11 +481,29 @@ def main():
         },
         fallbacks=[CommandHandler("cancel", cancel)]
     )
+    list = ConversationHandler(
+        entry_points=[
+            # RegexHandler('^\/list\s\d+$', show_individual),
+            # CommandHandler("list", show_individual, filters=Filters.regex("^[a-zA-Z]+\s\d+$")),
+            CommandHandler("list", show_tx)
+        ],
+        states={
+            SHOW: [CallbackQueryHandler(show_details)],
+            DETAILS: [
+                CallbackQueryHandler(delete_tx, pattern="^\d+$"),
+                CallbackQueryHandler(cancel_details, pattern='^' + 'cancel' + '$'),
+                CallbackQueryHandler(show_another_tx, pattern='^' + 'other' + '$'),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)]
+    )
     updater.dispatcher.add_handler(expense)
     updater.dispatcher.add_handler(balance)
     updater.dispatcher.add_handler(split)
+    updater.dispatcher.add_handler(list)
     updater.dispatcher.add_handler(CommandHandler("help", show_help))
     updater.dispatcher.add_handler(CommandHandler("about", about))
+
     # updater.dispatcher.add_handler(MessageHandler(
     #    filters=Filters.regex("^[0-9]+"), callback=spend))
     updater.dispatcher.add_error_handler(error)

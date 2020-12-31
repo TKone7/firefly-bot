@@ -19,6 +19,9 @@ class Firefly(object):
     def _put(self, endpoint, payload):
         return requests.put("{}{}".format(self.hostname, endpoint), json=payload, headers=self.headers)
 
+    def _delete(self, endpoint):
+        return requests.delete("{}{}".format(self.hostname, endpoint), headers=self.headers)
+
     def _get(self, endpoint, params=None):
         response = requests.get("{}{}".format(
             self.hostname, endpoint), params=params, headers=self.headers)
@@ -27,8 +30,11 @@ class Firefly(object):
     def get_transactions(self, tx_type="all"):
         return self._get("transactions", params={"type": tx_type})
 
-    def get_transaction(self, id):
-        return self._get(f"transactions/{id}")
+    def get_transaction(self, tx_id):
+        return self._get(f"transactions/{tx_id}")
+
+    def delete_transaction(self, tx_id):
+        return self._delete(f"transactions/{tx_id}")
 
     def get_budgets(self):
         return self._get("budgets")
