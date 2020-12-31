@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 FIREFLY_URL, FIREFLY_TOKEN, DEFAULT_WITHDRAW_ACCOUNT = range(3)
 DESCRIPTION, SOURCE, DEST, AMOUNT = range(4)
+SELECT, SPLIT, SET_SPLIT_ACCOUNT = range(3)
 
 def start(update, context):
     update.message.reply_text("Please enter your Firefly III URL")
@@ -97,7 +98,7 @@ def spend(update, context):
     if not source_account:
         source_account = context.user_data["firefly_default_account"]
 
-    response = firefly.create_transaction(amount, description,
+    response = firefly.create_withdrawal(amount, description,
                                           source_account, destination_account, category, budget)
     if response.status_code == 422:
         update.message.reply_text(response.get("message"))
@@ -168,6 +169,97 @@ def get_balance(update, context):
     update.message.reply_text(
         "What balance do you want to know?", reply_markup=reply_markup)
     return 0
+
+def process_split_account(update: Update, context: CallbackContext) -> None:
+    query = update.callback_query
+    query.answer()
+    asset_account = json.loads(query.data)
+    context.user_data["firefly_split"] = asset_account
+    query.edit_message_text("Account stored. You can now start over again by typing /split")
+    return ConversationHandler.END
+
+def select_tx(update, context):
+    firefly = get_firefly(context)
+    balance_account = context.user_data.get("firefly_split")
+
+    if not balance_account:
+        reply_markup = get_defaultAsset_keyboard(firefly)
+        update.message.reply_text(
+            "Please define the account that should be used for balancing split amounts?", reply_markup=reply_markup)
+        return SET_SPLIT_ACCOUNT
+
+    response = firefly.get_transactions(tx_type="expense").get("data")
+    response.reverse()
+    txs_keyboard = []
+    for i, tx in enumerate(response):
+        sub_tx = tx.get("attributes").get("transactions")[0]
+        tx_desc = sub_tx.get("description")
+        tx_curry = sub_tx.get("currency_symbol")
+        tx_amount = round(float(sub_tx.get("amount")), 2)
+        id = tx.get("id")
+        txs_keyboard.append([InlineKeyboardButton(
+            f"{tx_desc} ({tx_curry} {tx_amount})", callback_data=id)])
+
+    reply_markup = InlineKeyboardMarkup(txs_keyboard)
+    update.message.reply_text(
+        "chose from the tx you want to change", reply_markup=reply_markup)
+    return SELECT
+
+def select_ratio(update: Update, context: CallbackContext) -> None:
+    query = update.callback_query
+    query.answer()
+    tx_id = query.data
+    context.user_data["split_tx_id"] = tx_id
+    ratio_keyboard = [[InlineKeyboardButton("specify amount", callback_data=0)],
+                      [InlineKeyboardButton("four", callback_data=(4)), InlineKeyboardButton("five", callback_data=(5))],
+                      [InlineKeyboardButton("two", callback_data=(2)), InlineKeyboardButton("three", callback_data=(3))]]
+    reply_markup = InlineKeyboardMarkup(ratio_keyboard)
+    query.edit_message_text(f"selected {tx_id}")
+    query.message.reply_text("Chose a ratio to split:", reply_markup=reply_markup)
+    return SPLIT
+def split_transaction(update: Update, context: CallbackContext) -> None:
+    firefly = get_firefly(context)
+    query = update.callback_query
+    query.answer()
+    tx_id = int(context.user_data.get("split_tx_id"))
+    ratio = float(query.data)
+
+    tx = firefly.get_transaction(tx_id).get("data")
+
+    # calculate reduced amount for the existing expense tx
+    amount = float(tx.get("attributes").get("transactions")[0].get("amount"))
+    new_amount = amount / ratio
+
+    # create a new tx that transfers the reduced amound to the split balance account
+    balance_tx = tx.get("attributes").get("transactions")[0]
+    balance_tx_destination_name = "Splid Balance"
+    balance_tx_source = balance_tx["source_id"]
+    balance_tx_amount = float(balance_tx["amount"]) - new_amount
+    balance_tx_category = balance_tx["category_id"]
+    balance_tx_budget = balance_tx["budget_id"]
+    balance_tx_description = "[Split] - " + balance_tx["description"]
+    balance_tx_date = balance_tx["date"]
+    query.edit_message_text(text=f"Split tx '{balance_tx['description']}'")
+
+    try:
+        response = firefly.update_transaction(tx_id, amount=new_amount, description=balance_tx_description)
+        response_create = firefly.create_transaction(
+            type="transfer",
+            amount=balance_tx_amount,
+            description=balance_tx_description,
+            source_id=balance_tx_source,
+            destination_name=balance_tx_destination_name,
+            category_id=balance_tx_category,
+            budget_id=balance_tx_budget,
+            date=balance_tx_date
+        )
+        id = response.json().get("data").get("id")
+        id_create = response_create.json().get("data").get("id")
+        query.message.reply_text(f"Update transaction {id}") if response.status_code == 200 else query.message.reply_text(f"Error in update {response.status_code}")
+        query.message.reply_text(f"Created transaction {id_create}") if response_create.status_code == 200 else query.message.reply_text(f"Error in creation {response_create.status_code}")
+    except:
+        query.message.reply_text("Something went wrong")
+    return ConversationHandler.END
 
 def show_balance(update: Update, context: CallbackContext) -> None:
     query = update.callback_query
@@ -270,7 +362,7 @@ def summarize(update, context):
     update.message.reply_text(f"Withdraw from {asset_account['name']} to {expense_account}, amount {update.message.text}, description: {description}")
 
     firefly = get_firefly(context)
-    response = firefly.create_transaction(update.message.text, description,
+    response = firefly.create_withdrawal(update.message.text, description,
                                           asset_account['id'], expense_account)
     if response.status_code == 422:
         update.message.reply_text(response.get("message"))
@@ -338,8 +430,19 @@ def main():
         },
         fallbacks=[CommandHandler("cancel", cancel)]
     )
+
+    split = ConversationHandler(
+        entry_points=[CommandHandler("split", select_tx)],
+        states={
+            SELECT: [CallbackQueryHandler(select_ratio)],
+            SPLIT: [CallbackQueryHandler(split_transaction)],
+            SET_SPLIT_ACCOUNT: [CallbackQueryHandler(process_split_account)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)]
+    )
     updater.dispatcher.add_handler(expense)
     updater.dispatcher.add_handler(balance)
+    updater.dispatcher.add_handler(split)
     updater.dispatcher.add_handler(CommandHandler("help", help))
     updater.dispatcher.add_handler(CommandHandler("about", about))
     #updater.dispatcher.add_handler(MessageHandler(
