@@ -172,9 +172,9 @@ def get_balance(update, context):
 def show_balance(update: Update, context: CallbackContext) -> None:
     query = update.callback_query
     query.answer()
-    asset_account_id = query.data
+    asset_account = json.loads(query.data)
     firefly = get_firefly(context)
-    account = firefly.get_account(asset_account_id).get("data")
+    account = firefly.get_account(asset_account['id']).get("data")
     account_name = account.get("attributes").get("name")
     balance = account.get("attributes").get("current_balance")
     curr = account.get("attributes").get("currency_code")
